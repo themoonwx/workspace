@@ -4,6 +4,299 @@ const path = require('path');
 
 const PORT = 3001;
 
+// ==================== 数据库初始化 ====================
+const Database = require('better-sqlite3');
+const dbPath = path.join(__dirname, 'data.db');
+let db;
+
+// 初始化数据库
+function initDatabase() {
+    try {
+        db = new Database(dbPath);
+        console.log('数据库连接成功:', dbPath);
+
+        // 创建用户表
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                name TEXT NOT NULL,
+                role TEXT DEFAULT 'user',
+                tenantId TEXT,
+                createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // 创建租户表
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS tenants (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                plan TEXT DEFAULT 'basic',
+                maxUsers INTEGER DEFAULT 10,
+                features TEXT DEFAULT '[]',
+                createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+
+        // 创建平台配置表
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS platform_configs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenantId TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                config TEXT NOT NULL,
+                enabled INTEGER DEFAULT 1,
+                createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (tenantId) REFERENCES tenants(id)
+            )
+        `);
+
+        // 创建权限表
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS permissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                userId INTEGER NOT NULL,
+                permission TEXT NOT NULL,
+                createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (userId) REFERENCES users(id)
+            )
+        `);
+
+        // 如果数据库为空，导入初始数据
+        const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get();
+        if (userCount.count === 0) {
+            console.log('导入初始数据...');
+            importInitialData();
+        }
+
+        console.log('数据库初始化完成');
+    } catch (error) {
+        console.error('数据库初始化失败:', error);
+        process.exit(1);
+    }
+}
+
+// 导入初始数据
+function importInitialData() {
+    // 导入租户
+    const insertTenant = db.prepare('INSERT INTO tenants (id, name, plan, maxUsers, features) VALUES (?, ?, ?, ?, ?)');
+    insertTenant.run('tenant-001', '示例公司', 'enterprise', 100, JSON.stringify(['analytics', 'api', 'customDomain']));
+    insertTenant.run('tenant-002', '租户二公司', 'basic', 10, JSON.stringify(['analytics']));
+
+    // 导入用户
+    const insertUser = db.prepare('INSERT INTO users (username, password, name, role, tenantId) VALUES (?, ?, ?, ?, ?)');
+    insertUser.run('admin', '123456', '管理员', 'admin', 'tenant-001');
+    insertUser.run('user', '123456', '普通用户', 'user', 'tenant-001');
+    insertUser.run('tenant2', '123456', '租户2用户', 'user', 'tenant-002');
+    insertUser.run('test1', '123456', '测试用户1', 'user', 'tenant-001');
+    insertUser.run('test2', '123456', '测试用户2', 'user', 'tenant-001');
+
+    // 导入权限
+    const insertPermission = db.prepare('INSERT INTO permissions (userId, permission) VALUES (?, ?)');
+    insertPermission.run(1, 'modify_config');
+    insertPermission.run(1, 'call_claude');
+    insertPermission.run(1, 'send_message');
+    insertPermission.run(1, 'receive_message');
+    insertPermission.run(2, 'send_message');
+    insertPermission.run(2, 'receive_message');
+}
+
+// 数据库查询辅助函数
+function getUsers(tenantId) {
+    return db.prepare('SELECT id, username, name, role, tenantId FROM users WHERE tenantId = ?').all(tenantId);
+}
+
+function getUserById(userId) {
+    return db.prepare('SELECT id, username, name, role, tenantId FROM users WHERE id = ?').get(userId);
+}
+
+function getTenant(tenantId) {
+    return db.prepare('SELECT * FROM tenants WHERE id = ?').get(tenantId);
+}
+
+function getTenants() {
+    return db.prepare('SELECT * FROM tenants').all();
+}
+
+function getPlatformConfigs(tenantId) {
+    const configs = db.prepare('SELECT * FROM platform_configs WHERE tenantId = ?').all(tenantId);
+    return configs.map(c => ({ ...c, config: JSON.parse(c.config), enabled: !!c.enabled }));
+}
+
+function savePlatformConfig(tenantId, platform, config) {
+    const existing = db.prepare('SELECT id FROM platform_configs WHERE tenantId = ? AND platform = ?').get(tenantId, platform);
+    if (existing) {
+        db.prepare('UPDATE platform_configs SET config = ?, updatedAt = CURRENT_TIMESTAMP WHERE tenantId = ? AND platform = ?')
+            .run(JSON.stringify(config), tenantId, platform);
+    } else {
+        db.prepare('INSERT INTO platform_configs (tenantId, platform, config) VALUES (?, ?, ?)')
+            .run(tenantId, platform, JSON.stringify(config));
+    }
+}
+
+function deletePlatformConfig(tenantId, platform) {
+    db.prepare('DELETE FROM platform_configs WHERE tenantId = ? AND platform = ?').run(tenantId, platform);
+}
+
+function getPermissions(userId) {
+    return db.prepare('SELECT permission FROM permissions WHERE userId = ?').all(userId).map(p => p.permission);
+}
+
+function setPermissions(userId, permissions) {
+    db.prepare('DELETE FROM permissions WHERE userId = ?').run(userId);
+    const insert = db.prepare('INSERT INTO permissions (userId, permission) VALUES (?, ?)');
+    for (const perm of permissions) {
+        insert.run(userId, perm);
+    }
+}
+
+// 平台配置定义
+const PLATFORM_CONFIGS = {
+    discord: {
+        name: 'Discord',
+        icon: '💬',
+        fields: [
+            { key: 'token', label: 'Bot Token', type: 'password', required: true, placeholder: 'MTAx...',
+              help: '在 Discord Developer Portal 创建应用后获取 Bot Token' },
+            { key: 'name', label: 'Bot名称', type: 'text', required: false, placeholder: 'OpenClaw Bot' }
+        ],
+        instructions: `
+            获取 Discord Bot Token:
+            1. 访问 https://discord.com/developers/applications
+            2. 创建新应用 → Bot → Reset Token
+            3. 启用 MESSAGE CONTENT INTENT
+            4. 生成邀请链接: OAuth2 → URL Generator → bot 权限
+        `
+    },
+    telegram: {
+        name: 'Telegram',
+        icon: '✈️',
+        fields: [
+            { key: 'botToken', label: 'Bot Token', type: 'password', required: true, placeholder: '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11',
+              help: '通过 @BotFather 创建机器人获取' }
+        ],
+        instructions: `
+            获取 Telegram Bot Token:
+            1. 在 Telegram 中搜索 @BotFather
+            2. 发送 /newbot 创建新机器人
+            3. 按提示设置名称和用户名
+            4. 获取 Bot Token
+        `
+    },
+    slack: {
+        name: 'Slack',
+        icon: '💼',
+        fields: [
+            { key: 'botToken', label: 'Bot Token', type: 'password', required: true, placeholder: 'xoxb-...',
+              help: '在 Slack App 设置中获取' },
+            { key: 'signingSecret', label: 'Signing Secret', type: 'password', required: true, placeholder: '...',
+              help: '在 Slack App 的 Basic Information 中获取' },
+            { key: 'appToken', label: 'App Token', type: 'password', required: false, placeholder: 'xapp-...',
+              help: '如果使用 Socket Mode，需要获取 App Token' }
+        ],
+        instructions: `
+            获取 Slack 配置:
+            1. 访问 https://api.slack.com/apps
+            2. 创建新 App (From scratch)
+            3. 在 OAuth & Permissions 添加 scopes: chat:write, channels:read, im:read 等
+            4. 安装到工作区获取 Bot Token
+            5. 在 Basic Information 获取 Signing Secret
+        `
+    },
+    feishu: {
+        name: '飞书',
+        icon: '📱',
+        fields: [
+            { key: 'appId', label: 'App ID', type: 'text', required: true, placeholder: 'cli_xxxxx',
+              help: '在飞书开放平台应用设置中获取' },
+            { key: 'appSecret', label: 'App Secret', type: 'password', required: true, placeholder: '...',
+              help: '在飞书开放平台应用设置中获取' },
+            { key: 'encryptKey', label: 'Encrypt Key', type: 'password', required: false, placeholder: '...',
+              help: '可选，用于验证请求真实性' },
+            { key: 'verificationToken', label: 'Verification Token', type: 'password', required: false, placeholder: '...',
+              help: '用于接收事件回调验证' },
+            { key: 'domain', label: '域名', type: 'select', options: ['feishu', 'lark'], required: false }
+        ],
+        instructions: `
+            获取飞书配置:
+            1. 访问 https://open.feishu.cn/app
+            2. 创建企业自建应用
+            3. 在应用设置中获取 App ID 和 App Secret
+            4. 添加权限: im.chat, im.message, contact:user.basecard 等
+            5. 创建版本并发布
+        `
+    },
+    dingtalk: {
+        name: '钉钉',
+        icon: '🔔',
+        fields: [
+            { key: 'agentId', label: 'Agent ID', type: 'text', required: true, placeholder: '...',
+              help: '在钉钉开放平台应用详情中获取' },
+            { key: 'appKey', label: 'App Key', type: 'text', required: true, placeholder: 'ding...',
+              help: '在钉钉开放平台应用凭证中获取' },
+            { key: 'appSecret', label: 'App Secret', type: 'password', required: true, placeholder: '...',
+              help: '在钉钉开放平台应用凭证中获取' }
+        ],
+        instructions: `
+            获取钉钉配置:
+            1. 访问 https://open.dingtalk.com
+            2. 创建企业自建应用
+            3. 在应用详情获取 Agent ID
+            4. 在应用凭证获取 App Key 和 App Secret
+            5. 添加 API 权限: 群消息、发送工作通知等
+        `
+    },
+    wecom: {
+        name: '企业微信',
+        icon: '💼',
+        fields: [
+            { key: 'corpId', label: 'Corp ID', type: 'text', required: true, placeholder: 'ww...',
+              help: '在企业微信管理后台获取' },
+            { key: 'corpSecret', label: 'Corp Secret', type: 'password', required: true, placeholder: '...',
+              help: '在企业微信管理后台-应用管理中获取' },
+            { key: 'agentId', label: 'Agent ID', type: 'text', required: true, placeholder: '...',
+              help: '在企业微信应用管理中获取' }
+        ],
+        instructions: `
+            获取企业微信配置:
+            1. 访问 https://work.weixin.qq.com
+            2. 创建自建应用
+            3. 在应用管理获取 Agent ID
+            4. 在我的企业获取 Corp ID
+            5. 在应用管理获取 Corp Secret
+        `
+    },
+    line: {
+        name: 'LINE',
+        icon: '📱',
+        fields: [
+            { key: 'channelAccessToken', label: 'Channel Access Token', type: 'password', required: true, placeholder: '...',
+              help: '在 LINE Developers Console 获取' },
+            { key: 'channelSecret', label: 'Channel Secret', type: 'password', required: true, placeholder: '...',
+              help: '在 LINE Developers Console 获取' }
+        ],
+        instructions: `
+            获取 LINE 配置:
+            1. 访问 https://developers.line.biz
+            2. 创建 Provider 和 Channel
+            3. 在 Messaging API 设置中获取 Channel Access Token
+            4. 在 Basic Settings 获取 Channel Secret
+            5. 启用 Webhook
+        `
+    }
+};
+
+// 权限定义
+const PERMISSIONS = [
+    { key: 'modify_config', name: '修改服务器配置', description: '可以修改租户的服务器配置' },
+    { key: 'call_claude', name: '调用Claude Code', description: '可以通过AI进行对话' },
+    { key: 'send_message', name: '发送消息', description: '可以通过社交平台发送消息' },
+    { key: 'receive_message', name: '接收消息', description: '可以接收来自社交平台的消息' }
+];
+
 // 模拟用户数据（实际项目中应该从数据库获取）
 const users = [
     { id: 1, username: 'admin', password: '123456', name: '管理员', role: 'admin', tenantId: 'tenant-001' },
@@ -88,10 +381,11 @@ async function handleApi(req, res) {
         if (url === '/api/login' && method === 'POST') {
             const { username, password } = await parseBody(req);
 
-            const user = users.find(u => u.username === username && u.password === password);
+            // 从数据库查询用户
+            const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(username, password);
 
             if (user) {
-                // 返回 token 和用户信息（实际应该使用 JWT）
+                // 返回 token 和用户信息
                 const token = Buffer.from(`${user.id}:${user.tenantId}`).toString('base64');
                 res.writeHead(200);
                 res.end(JSON.stringify({
@@ -112,6 +406,186 @@ async function handleApi(req, res) {
             return;
         }
 
+        // 获取平台配置定义 API
+        if (url === '/api/platforms' && method === 'GET') {
+            res.writeHead(200);
+            res.end(JSON.stringify({
+                success: true,
+                platforms: PLATFORM_CONFIGS,
+                permissions: PERMISSIONS
+            }));
+            return;
+        }
+
+        // 获取租户的平台配置 API
+        if (url === '/api/tenant/platforms' && method === 'GET') {
+            const authHeader = req.headers.authorization;
+            if (!authHeader) {
+                res.writeHead(401);
+                res.end(JSON.stringify({ success: false, message: '未授权' }));
+                return;
+            }
+
+            const token = authHeader.replace('Bearer ', '');
+            try {
+                const decoded = Buffer.from(token, 'base64').toString();
+                const [userId, tenantId] = decoded.split(':');
+
+                const configs = getPlatformConfigs(tenantId);
+                res.writeHead(200);
+                res.end(JSON.stringify({ success: true, configs }));
+            } catch (e) {
+                res.writeHead(401);
+                res.end(JSON.stringify({ success: false, message: '无效的 token' }));
+            }
+            return;
+        }
+
+        // 保存租户平台配置 API
+        if (url === '/api/tenant/platforms' && method === 'POST') {
+            const authHeader = req.headers.authorization;
+            if (!authHeader) {
+                res.writeHead(401);
+                res.end(JSON.stringify({ success: false, message: '未授权' }));
+                return;
+            }
+
+            const token = authHeader.replace('Bearer ', '');
+            try {
+                const decoded = Buffer.from(token, 'base64').toString();
+                const [userId, tenantId] = decoded.split(':');
+
+                // 检查权限
+                const userPerms = getPermissions(parseInt(userId));
+                if (!userPerms.includes('modify_config')) {
+                    res.writeHead(403);
+                    res.end(JSON.stringify({ success: false, message: '没有修改配置的权限' }));
+                    return;
+                }
+
+                const body = await parseBody(req);
+                const { platform, config, enabled } = body;
+
+                if (!platform || !config) {
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ success: false, message: '平台和配置不能为空' }));
+                    return;
+                }
+
+                savePlatformConfig(tenantId, platform, config);
+
+                // 如果需要禁用
+                if (enabled === false) {
+                    db.prepare('UPDATE platform_configs SET enabled = 0 WHERE tenantId = ? AND platform = ?')
+                        .run(tenantId, platform);
+                }
+
+                res.writeHead(200);
+                res.end(JSON.stringify({ success: true, message: '配置保存成功' }));
+            } catch (e) {
+                res.writeHead(401);
+                res.end(JSON.stringify({ success: false, message: '无效的 token' }));
+            }
+            return;
+        }
+
+        // 删除租户平台配置 API
+        if (url.startsWith('/api/tenant/platforms/') && method === 'DELETE') {
+            const authHeader = req.headers.authorization;
+            if (!authHeader) {
+                res.writeHead(401);
+                res.end(JSON.stringify({ success: false, message: '未授权' }));
+                return;
+            }
+
+            const token = authHeader.replace('Bearer ', '');
+            try {
+                const decoded = Buffer.from(token, 'base64').toString();
+                const [userId, tenantId] = decoded.split(':');
+
+                // 检查权限
+                const userPerms = getPermissions(parseInt(userId));
+                if (!userPerms.includes('modify_config')) {
+                    res.writeHead(403);
+                    res.end(JSON.stringify({ success: false, message: '没有修改配置的权限' }));
+                    return;
+                }
+
+                const platform = url.replace('/api/tenant/platforms/', '');
+                deletePlatformConfig(tenantId, platform);
+
+                res.writeHead(200);
+                res.end(JSON.stringify({ success: true, message: '配置删除成功' }));
+            } catch (e) {
+                res.writeHead(401);
+                res.end(JSON.stringify({ success: false, message: '无效的 token' }));
+            }
+            return;
+        }
+
+        // 获取用户权限 API
+        if (url.startsWith('/api/permissions/') && method === 'GET') {
+            const authHeader = req.headers.authorization;
+            if (!authHeader) {
+                res.writeHead(401);
+                res.end(JSON.stringify({ success: false, message: '未授权' }));
+                return;
+            }
+
+            const token = authHeader.replace('Bearer ', '');
+            try {
+                const decoded = Buffer.from(token, 'base64').toString();
+                const [userId, tenantId] = decoded.split(':');
+
+                const targetUserId = url.replace('/api/permissions/', '');
+                const permissions = getPermissions(parseInt(targetUserId));
+
+                res.writeHead(200);
+                res.end(JSON.stringify({ success: true, permissions }));
+            } catch (e) {
+                res.writeHead(401);
+                res.end(JSON.stringify({ success: false, message: '无效的 token' }));
+            }
+            return;
+        }
+
+        // 更新用户权限 API
+        if (url.startsWith('/api/permissions/') && method === 'POST') {
+            const authHeader = req.headers.authorization;
+            if (!authHeader) {
+                res.writeHead(401);
+                res.end(JSON.stringify({ success: false, message: '未授权' }));
+                return;
+            }
+
+            const token = authHeader.replace('Bearer ', '');
+            try {
+                const decoded = Buffer.from(token, 'base64').toString();
+                const [userId, tenantId] = decoded.split(':');
+
+                // 检查是否是管理员
+                const currentUser = getUserById(parseInt(userId));
+                if (!currentUser || currentUser.role !== 'admin') {
+                    res.writeHead(403);
+                    res.end(JSON.stringify({ success: false, message: '只有管理员才能管理权限' }));
+                    return;
+                }
+
+                const targetUserId = url.replace('/api/permissions/', '');
+                const body = await parseBody(req);
+                const { permissions } = body;
+
+                setPermissions(parseInt(targetUserId), permissions || []);
+
+                res.writeHead(200);
+                res.end(JSON.stringify({ success: true, message: '权限更新成功' }));
+            } catch (e) {
+                res.writeHead(401);
+                res.end(JSON.stringify({ success: false, message: '无效的 token' }));
+            }
+            return;
+        }
+
         // 获取当前用户信息 API
         if (url === '/api/user' && method === 'GET') {
             const authHeader = req.headers.authorization;
@@ -125,9 +599,11 @@ async function handleApi(req, res) {
             try {
                 const decoded = Buffer.from(token, 'base64').toString();
                 const [userId, tenantId] = decoded.split(':');
-                const user = users.find(u => u.id === parseInt(userId));
+                const user = getUserById(parseInt(userId));
 
                 if (user) {
+                    // 获取用户权限
+                    const permissions = getPermissions(user.id);
                     res.writeHead(200);
                     res.end(JSON.stringify({
                         success: true,
@@ -136,7 +612,8 @@ async function handleApi(req, res) {
                             username: user.username,
                             name: user.name,
                             role: user.role,
-                            tenantId: user.tenantId
+                            tenantId: user.tenantId,
+                            permissions: permissions
                         }
                     }));
                 } else {
@@ -163,11 +640,20 @@ async function handleApi(req, res) {
             try {
                 const decoded = Buffer.from(token, 'base64').toString();
                 const [userId, tenantId] = decoded.split(':');
-                const tenant = tenants[tenantId];
+                const tenant = getTenant(tenantId);
 
                 if (tenant) {
+                    // 获取平台配置
+                    const configs = getPlatformConfigs(tenantId);
                     res.writeHead(200);
-                    res.end(JSON.stringify({ success: true, tenant }));
+                    res.end(JSON.stringify({
+                        success: true,
+                        tenant: {
+                            ...tenant,
+                            features: JSON.parse(tenant.features || '[]'),
+                            platformConfigs: configs
+                        }
+                    }));
                 } else {
                     res.writeHead(404);
                     res.end(JSON.stringify({ success: false, message: '租户不存在' }));
@@ -194,16 +680,16 @@ async function handleApi(req, res) {
                 const [userId, tenantId] = decoded.split(':');
 
                 // 获取当前租户的所有用户
-                const tenantUsers = users.filter(u => u.tenantId === tenantId).map(u => ({
-                    id: u.id,
-                    username: u.username,
-                    name: u.name,
-                    role: u.role,
-                    tenantId: u.tenantId
+                const tenantUsers = getUsers(tenantId);
+
+                // 获取每个用户的权限
+                const usersWithPerms = tenantUsers.map(u => ({
+                    ...u,
+                    permissions: getPermissions(u.id)
                 }));
 
                 res.writeHead(200);
-                res.end(JSON.stringify({ success: true, users: tenantUsers }));
+                res.end(JSON.stringify({ success: true, users: usersWithPerms }));
             } catch (e) {
                 res.writeHead(401);
                 res.end(JSON.stringify({ success: false, message: '无效的 token' }));
@@ -291,7 +777,7 @@ async function handleApi(req, res) {
             try {
                 const decoded = Buffer.from(token, 'base64').toString();
                 const [userId, tenantId] = decoded.split(':');
-                const currentUser = users.find(u => u.id === parseInt(userId));
+                const currentUser = getUserById(parseInt(userId));
 
                 // 检查是否是管理员
                 if (!currentUser || currentUser.role !== 'admin') {
@@ -301,7 +787,7 @@ async function handleApi(req, res) {
                 }
 
                 const body = await parseBody(req);
-                const { name, plan, maxUsers } = body;
+                const { name, plan, maxUsers, platformConfigs } = body;
 
                 if (!name) {
                     res.writeHead(400);
@@ -312,19 +798,32 @@ async function handleApi(req, res) {
                 // 生成新租户ID
                 const newTenantId = 'tenant-' + Date.now();
 
-                // 创建新租户
-                const newTenant = {
-                    id: newTenantId,
-                    name: name,
-                    plan: plan || 'basic',
-                    maxUsers: maxUsers || 10,
-                    features: plan === 'enterprise' ? ['analytics', 'api', 'customDomain'] : ['analytics']
-                };
+                // 保存租户到数据库
+                const features = plan === 'enterprise' ? JSON.stringify(['analytics', 'api', 'customDomain']) : JSON.stringify(['analytics']);
+                db.prepare('INSERT INTO tenants (id, name, plan, maxUsers, features) VALUES (?, ?, ?, ?, ?)')
+                    .run(newTenantId, name, plan || 'basic', maxUsers || 10, features);
 
-                tenants[newTenantId] = newTenant;
+                // 保存平台配置
+                if (platformConfigs && Array.isArray(platformConfigs)) {
+                    for (const config of platformConfigs) {
+                        if (config.platform && config.config) {
+                            savePlatformConfig(newTenantId, config.platform, config.config);
+                        }
+                    }
+                }
 
                 res.writeHead(200);
-                res.end(JSON.stringify({ success: true, message: '租户添加成功', tenant: newTenant }));
+                res.end(JSON.stringify({
+                    success: true,
+                    message: '租户添加成功',
+                    tenant: {
+                        id: newTenantId,
+                        name: name,
+                        plan: plan || 'basic',
+                        maxUsers: maxUsers || 10,
+                        features: JSON.parse(features)
+                    }
+                }));
             } catch (e) {
                 res.writeHead(401);
                 res.end(JSON.stringify({ success: false, message: '无效的 token' }));
@@ -345,7 +844,7 @@ async function handleApi(req, res) {
             try {
                 const decoded = Buffer.from(token, 'base64').toString();
                 const [userId, tenantId] = decoded.split(':');
-                const currentUser = users.find(u => u.id === parseInt(userId));
+                const currentUser = getUserById(parseInt(userId));
 
                 // 检查是否是管理员
                 if (!currentUser || currentUser.role !== 'admin') {
@@ -364,20 +863,33 @@ async function handleApi(req, res) {
                 }
 
                 // 检查租户是否存在
-                if (!tenants[id]) {
+                const existingTenant = getTenant(id);
+                if (!existingTenant) {
                     res.writeHead(404);
                     res.end(JSON.stringify({ success: false, message: '租户不存在' }));
                     return;
                 }
 
-                // 更新租户信息
-                tenants[id].name = name;
-                tenants[id].plan = plan || tenants[id].plan || 'basic';
-                tenants[id].maxUsers = maxUsers || tenants[id].maxUsers || 10;
-                tenants[id].features = plan === 'enterprise' ? ['analytics', 'api', 'customDomain'] : ['analytics'];
+                // 更新租户信息到数据库
+                const newPlan = plan || existingTenant.plan || 'basic';
+                const newMaxUsers = maxUsers || existingTenant.maxUsers || 10;
+                const features = newPlan === 'enterprise' ? JSON.stringify(['analytics', 'api', 'customDomain']) : JSON.stringify(['analytics']);
+
+                db.prepare('UPDATE tenants SET name = ?, plan = ?, maxUsers = ?, features = ? WHERE id = ?')
+                    .run(name, newPlan, newMaxUsers, features, id);
 
                 res.writeHead(200);
-                res.end(JSON.stringify({ success: true, message: '租户更新成功', tenant: tenants[id] }));
+                res.end(JSON.stringify({
+                    success: true,
+                    message: '租户更新成功',
+                    tenant: {
+                        id,
+                        name,
+                        plan: newPlan,
+                        maxUsers: newMaxUsers,
+                        features: JSON.parse(features)
+                    }
+                }));
             } catch (e) {
                 res.writeHead(401);
                 res.end(JSON.stringify({ success: false, message: '无效的 token' }));
@@ -398,7 +910,7 @@ async function handleApi(req, res) {
             try {
                 const decoded = Buffer.from(token, 'base64').toString();
                 const [userId, tenantId] = decoded.split(':');
-                const currentUser = users.find(u => u.id === parseInt(userId));
+                const currentUser = getUserById(parseInt(userId));
 
                 // 检查是否是管理员
                 if (!currentUser || currentUser.role !== 'admin') {
@@ -407,7 +919,11 @@ async function handleApi(req, res) {
                     return;
                 }
 
-                const tenantList = Object.values(tenants);
+                // 从数据库获取所有租户
+                const tenantList = getTenants().map(t => ({
+                    ...t,
+                    features: JSON.parse(t.features || '[]')
+                }));
                 res.writeHead(200);
                 res.end(JSON.stringify({ success: true, tenants: tenantList }));
             } catch (e) {
@@ -918,6 +1434,77 @@ const dashboardPage = `
             background: #e3f2fd;
             color: #1565c0;
         }
+        .platform-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 16px;
+        }
+        .platform-card {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 16px;
+            border: 2px solid #e0e0e0;
+        }
+        .platform-card.disabled {
+            opacity: 0.6;
+        }
+        .platform-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .platform-icon {
+            font-size: 24px;
+        }
+        .platform-name {
+            font-weight: 600;
+            color: #333;
+            flex: 1;
+        }
+        .platform-status {
+            font-size: 12px;
+            color: #666;
+        }
+        .platform-fields {
+            font-size: 13px;
+        }
+        .platform-field {
+            display: flex;
+            padding: 4px 0;
+        }
+        .field-label {
+            color: #666;
+            min-width: 80px;
+        }
+        .field-value {
+            color: #333;
+            word-break: break-all;
+        }
+        .permission-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 12px;
+            margin-top: 12px;
+        }
+        .permission-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+        .permission-item input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+        }
+        .permission-label {
+            font-size: 14px;
+            color: #333;
+        }
         .modal {
             display: none;
             position: fixed;
@@ -1063,6 +1650,16 @@ const dashboardPage = `
             </div>
         </div>
 
+        <!-- 平台配置显示 -->
+        <div class="section" id="platformConfigsSection">
+            <div class="section-header">
+                <h2 class="section-title">平台配置</h2>
+            </div>
+            <div id="platformConfigsContainer">
+                <div class="loading">加载中...</div>
+            </div>
+        </div>
+
         <div class="section" id="adminSection" style="display: none;">
             <div class="section-header">
                 <h2 class="section-title">租户管理</h2>
@@ -1091,7 +1688,7 @@ const dashboardPage = `
 
     <!-- 添加租户模态框 -->
     <div class="modal" id="addTenantModal">
-        <div class="modal-content">
+        <div class="modal-content" style="max-width: 600px;">
             <div class="modal-header">
                 <h3 class="modal-title">添加新租户</h3>
                 <button class="modal-close" id="closeModal">&times;</button>
@@ -1113,6 +1710,37 @@ const dashboardPage = `
                     <label for="tenantMaxUsers">最大用户数</label>
                     <input type="number" id="tenantMaxUsersInput" name="maxUsers" value="10" min="1" max="1000">
                 </div>
+
+                <!-- 平台配置部分 -->
+                <div class="form-group" style="border-top: 1px solid #eee; padding-top: 16px; margin-top: 16px;">
+                    <label>平台配置 (可选)</label>
+                    <p style="font-size: 12px; color: #666; margin-top: 4px;">选择要配置的社交平台</p>
+                </div>
+                <div class="form-group">
+                    <label for="platformSelect">选择平台</label>
+                    <select id="platformSelect">
+                        <option value="">-- 选择平台 --</option>
+                        <option value="discord">💬 Discord</option>
+                        <option value="telegram">✈️ Telegram</option>
+                        <option value="slack">💼 Slack</option>
+                        <option value="feishu">📱 飞书</option>
+                        <option value="dingtalk">🔔 钉钉</option>
+                        <option value="wecom">💼 企业微信</option>
+                        <option value="line">📱 LINE</option>
+                    </select>
+                </div>
+                <div id="platformConfigFields"></div>
+                <div id="platformInstructions" class="form-group" style="display: none;">
+                    <div style="background: #f0f7ff; padding: 12px; border-radius: 8px; font-size: 12px; color: #333;">
+                        <strong>配置说明:</strong>
+                        <pre id="instructionsText" style="white-space: pre-wrap; margin-top: 8px;"></pre>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <button type="button" class="btn btn-small" id="addPlatformBtn" style="display: none;">+ 添加平台配置</button>
+                </div>
+                <div id="selectedPlatforms"></div>
+
                 <div class="modal-actions">
                     <button type="button" class="btn btn-cancel" id="cancelBtn">取消</button>
                     <button type="submit" class="btn">添加租户</button>
@@ -1178,6 +1806,69 @@ const dashboardPage = `
             document.getElementById('tenantPlan').textContent = tenantData.plan === 'enterprise' ? '企业版' : '基础版';
             document.getElementById('tenantMaxUsers').textContent = tenantData.maxUsers;
             document.getElementById('tenantFeatures').textContent = tenantData.features ? tenantData.features.join(', ') : '-';
+            // 加载平台配置
+            loadPlatformConfigs();
+        }
+
+        // 加载平台配置
+        async function loadPlatformConfigs() {
+            const container = document.getElementById('platformConfigsContainer');
+            container.innerHTML = '<div class="loading">加载中...</div>';
+
+            try {
+                const response = await fetch('/api/tenant/platforms', {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    if (data.configs && data.configs.length > 0) {
+                        let html = '<div class="platform-grid">';
+                        data.configs.forEach(config => {
+                            const platformInfo = getPlatformInfo(config.platform);
+                            html += '<div class="platform-card ' + (config.enabled ? '' : 'disabled') + '">';
+                            html += '<div class="platform-header">';
+                            html += '<span class="platform-icon">' + (platformInfo ? platformInfo.icon : '📱') + '</span>';
+                            html += '<span class="platform-name">' + (platformInfo ? platformInfo.name : config.platform) + '</span>';
+                            html += '<span class="platform-status">' + (config.enabled ? '✅ 已启用' : '❌ 已禁用') + '</span>';
+                            html += '</div>';
+                            html += '<div class="platform-fields">';
+                            if (config.config) {
+                                Object.keys(config.config).forEach(key => {
+                                    if (key.toLowerCase().includes('token') || key.toLowerCase().includes('secret') || key.toLowerCase().includes('password')) {
+                                        html += '<div class="platform-field"><span class="field-label">' + key + ':</span> <span class="field-value">******</span></div>';
+                                    } else if (typeof config.config[key] === 'string' && config.config[key]) {
+                                        html += '<div class="platform-field"><span class="field-label">' + key + ':</span> <span class="field-value">' + config.config[key] + '</span></div>';
+                                    }
+                                });
+                            }
+                            html += '</div></div>';
+                        });
+                        html += '</div>';
+                        container.innerHTML = html;
+                    } else {
+                        container.innerHTML = '<div class="empty-state">暂无平台配置，请添加</div>';
+                    }
+                } else {
+                    container.innerHTML = '<div class="empty-state">加载失败: ' + data.message + '</div>';
+                }
+            } catch (error) {
+                container.innerHTML = '<div class="empty-state">加载失败: ' + error.message + '</div>';
+            }
+        }
+
+        // 获取平台信息
+        function getPlatformInfo(platformId) {
+            const platforms = {
+                discord: { name: 'Discord', icon: '💬' },
+                telegram: { name: 'Telegram', icon: '✈️' },
+                slack: { name: 'Slack', icon: '💼' },
+                feishu: { name: '飞书', icon: '📱' },
+                dingtalk: { name: '钉钉', icon: '🔔' },
+                wecom: { name: '企业微信', icon: '💼' },
+                line: { name: 'LINE', icon: '📱' }
+            };
+            return platforms[platformId];
         }
 
         // 显示管理员部分
@@ -1206,12 +1897,27 @@ const dashboardPage = `
 
                 if (data.success) {
                     if (data.users && data.users.length > 0) {
-                        let html = '<table class="user-table"><thead><tr><th>ID</th><th>用户名</th><th>姓名</th><th>角色</th></tr></thead><tbody>';
+                        let html = '<table class="user-table"><thead><tr><th>ID</th><th>用户名</th><th>姓名</th><th>角色</th><th>权限</th><th>操作</th></tr></thead><tbody>';
                         data.users.forEach(u => {
-                            html += '<tr><td>' + u.id + '</td><td>' + u.username + '</td><td>' + u.name + '</td><td><span class="role-badge ' + (u.role === 'admin' ? 'role-admin' : 'role-user') + '">' + (u.role === 'admin' ? '管理员' : '普通用户') + '</span></td></tr>';
+                            const perms = u.permissions || [];
+                            html += '<tr>';
+                            html += '<td>' + u.id + '</td>';
+                            html += '<td>' + u.username + '</td>';
+                            html += '<td>' + u.name + '</td>';
+                            html += '<td><span class="role-badge ' + (u.role === 'admin' ? 'role-admin' : 'role-user') + '">' + (u.role === 'admin' ? '管理员' : '普通用户') + '</span></td>';
+                            html += '<td>' + (perms.length > 0 ? perms.join(', ') : '-') + '</td>';
+                            html += '<td><button class="btn btn-small edit-perm-btn" data-id="' + u.id + '" data-name="' + u.name + '">管理权限</button></td>';
+                            html += '</tr>';
                         });
                         html += '</tbody></table>';
                         container.innerHTML = html;
+
+                        // 绑定权限按钮事件
+                        document.querySelectorAll('.edit-perm-btn').forEach(btn => {
+                            btn.addEventListener('click', function() {
+                                openPermissionModal(this.dataset.id, this.dataset.name);
+                            });
+                        });
                     } else {
                         container.innerHTML = '<div class="empty-state">暂无用户数据</div>';
                     }
@@ -1221,6 +1927,118 @@ const dashboardPage = `
             } catch (error) {
                 container.innerHTML = '<div class="empty-state">加载失败: ' + error.message + '</div>';
             }
+        }
+
+        // 权限定义
+        const PERMISSIONS = [
+            { key: 'modify_config', name: '修改服务器配置', description: '可以修改租户的服务器配置' },
+            { key: 'call_claude', name: '调用Claude Code', description: '可以通过AI进行对话' },
+            { key: 'send_message', name: '发送消息', description: '可以通过社交平台发送消息' },
+            { key: 'receive_message', name: '接收消息', description: '可以接收来自社交平台的消息' }
+        ];
+
+        // 权限模态框
+        let permissionModal = null;
+
+        function openPermissionModal(userId, userName) {
+            // 创建模态框
+            if (!permissionModal) {
+                permissionModal = document.createElement('div');
+                permissionModal.className = 'modal show';
+                permissionModal.id = 'permissionModal';
+                permissionModal.innerHTML = '<div class="modal-content">' +
+                    '<div class="modal-header">' +
+                    '<h3 class="modal-title" id="permModalTitle">权限管理</h3>' +
+                    '<button class="modal-close" id="closePermModal">&times;</button>' +
+                    '</div>' +
+                    '<div class="message" id="permFormMessage"></div>' +
+                    '<div id="permissionList"></div>' +
+                    '<div class="modal-actions">' +
+                    '<button type="button" class="btn btn-cancel" id="cancelPermBtn">取消</button>' +
+                    '<button type="button" class="btn" id="savePermBtn">保存权限</button>' +
+                    '</div>' +
+                    '</div>';
+                document.body.appendChild(permissionModal);
+
+                // 绑定关闭事件
+                document.getElementById('closePermModal').addEventListener('click', closePermissionModal);
+                document.getElementById('cancelPermBtn').addEventListener('click', closePermissionModal);
+                permissionModal.addEventListener('click', function(e) {
+                    if (e.target === permissionModal) closePermissionModal();
+                });
+            }
+
+            // 加载当前用户权限
+            loadUserPermissions(userId, userName);
+            permissionModal.classList.add('show');
+        }
+
+        function closePermissionModal() {
+            if (permissionModal) {
+                permissionModal.classList.remove('show');
+            }
+        }
+
+        async function loadUserPermissions(userId, userName) {
+            document.getElementById('permModalTitle').textContent = '权限管理 - ' + userName;
+            const permList = document.getElementById('permissionList');
+
+            try {
+                const response = await fetch('/api/permissions/' + userId, {
+                    headers: { 'Authorization': 'Bearer ' + token }
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    const userPerms = data.permissions || [];
+                    let html = '<div class="permission-grid">';
+                    PERMISSIONS.forEach(p => {
+                        html += '<div class="permission-item">';
+                        html += '<input type="checkbox" id="perm_' + p.key + '" value="' + p.key + '" ' + (userPerms.includes(p.key) ? 'checked' : '') + '>';
+                        html += '<label class="permission-label" for="perm_' + p.key + '">' + p.name + '</label>';
+                        html += '</div>';
+                    });
+                    html += '</div>';
+                    permList.innerHTML = html;
+                } else {
+                    permList.innerHTML = '<div class="message show">加载失败: ' + data.message + '</div>';
+                }
+            } catch (error) {
+                permList.innerHTML = '<div class="message show">加载失败: ' + error.message + '</div>';
+            }
+
+            // 保存权限按钮
+            document.getElementById('savePermBtn').onclick = async function() {
+                const checkboxes = document.querySelectorAll('#permissionList input[type="checkbox"]:checked');
+                const selectedPerms = Array.from(checkboxes).map(cb => cb.value);
+
+                try {
+                    const response = await fetch('/api/permissions/' + userId, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': 'Bearer ' + token
+                        },
+                        body: JSON.stringify({ permissions: selectedPerms })
+                    });
+                    const data = await response.json();
+
+                    if (data.success) {
+                        document.getElementById('permFormMessage').className = 'message show message-success';
+                        document.getElementById('permFormMessage').textContent = '权限保存成功';
+                        setTimeout(function() {
+                            closePermissionModal();
+                            loadUsers();
+                        }, 1000);
+                    } else {
+                        document.getElementById('permFormMessage').className = 'message show';
+                        document.getElementById('permFormMessage').textContent = data.message;
+                    }
+                } catch (error) {
+                    document.getElementById('permFormMessage').className = 'message show';
+                    document.getElementById('permFormMessage').textContent = '保存失败: ' + error.message;
+                }
+            };
         }
 
         // 刷新用户列表
@@ -1304,6 +2122,19 @@ const dashboardPage = `
             const plan = document.getElementById('tenantPlanSelect').value;
             const maxUsers = parseInt(document.getElementById('tenantMaxUsersInput').value);
 
+            // 收集平台配置
+            const platformConfigs = [];
+            document.querySelectorAll('.platform-config-item').forEach(item => {
+                const platform = item.dataset.platform;
+                const config = {};
+                item.querySelectorAll('input, select').forEach(input => {
+                    config[input.name] = input.value;
+                });
+                if (Object.keys(config).some(k => config[k])) {
+                    platformConfigs.push({ platform, config });
+                }
+            });
+
             formMessage.className = 'message show';
             formMessage.textContent = '提交中...';
 
@@ -1314,7 +2145,7 @@ const dashboardPage = `
                         'Content-Type': 'application/json',
                         'Authorization': 'Bearer ' + token
                     },
-                    body: JSON.stringify({ name, plan, maxUsers })
+                    body: JSON.stringify({ name, plan, maxUsers, platformConfigs })
                 });
 
                 const data = await response.json();
@@ -1337,6 +2168,143 @@ const dashboardPage = `
                 formMessage.className = 'message show message-error';
                 formMessage.textContent = '添加失败: ' + error.message;
             }
+        });
+
+        // 平台选择变化时显示对应配置
+        const platformConfigsData = {
+            discord: {
+                name: 'Discord',
+                fields: [
+                    { name: 'token', label: 'Bot Token', type: 'password', placeholder: 'MTAx...', required: true }
+                ],
+                instructions: '获取 Discord Bot Token:\n1. 访问 https://discord.com/developers/applications\n2. 创建新应用 → Bot → Reset Token\n3. 启用 MESSAGE CONTENT INTENT\n4. 生成邀请链接: OAuth2 → URL Generator → bot 权限'
+            },
+            telegram: {
+                name: 'Telegram',
+                fields: [
+                    { name: 'botToken', label: 'Bot Token', type: 'password', placeholder: '123456:ABC-DEF...', required: true }
+                ],
+                instructions: '获取 Telegram Bot Token:\n1. 在 Telegram 中搜索 @BotFather\n2. 发送 /newbot 创建新机器人\n3. 按提示设置名称和用户名\n4. 获取 Bot Token'
+            },
+            slack: {
+                name: 'Slack',
+                fields: [
+                    { name: 'botToken', label: 'Bot Token', type: 'password', placeholder: 'xoxb-...', required: true },
+                    { name: 'signingSecret', label: 'Signing Secret', type: 'password', placeholder: '...', required: true }
+                ],
+                instructions: '获取 Slack 配置:\n1. 访问 https://api.slack.com/apps\n2. 创建新 App (From scratch)\n3. 在 OAuth & Permissions 添加 scopes\n4. 安装到工作区获取 Bot Token'
+            },
+            feishu: {
+                name: '飞书',
+                fields: [
+                    { name: 'appId', label: 'App ID', type: 'text', placeholder: 'cli_xxxxx', required: true },
+                    { name: 'appSecret', label: 'App Secret', type: 'password', placeholder: '...', required: true }
+                ],
+                instructions: '获取飞书配置:\n1. 访问 https://open.feishu.cn/app\n2. 创建企业自建应用\n3. 在应用设置中获取 App ID 和 App Secret\n4. 添加权限并发布'
+            },
+            dingtalk: {
+                name: '钉钉',
+                fields: [
+                    { name: 'agentId', label: 'Agent ID', type: 'text', placeholder: '...', required: true },
+                    { name: 'appKey', label: 'App Key', type: 'text', placeholder: 'ding...', required: true },
+                    { name: 'appSecret', label: 'App Secret', type: 'password', placeholder: '...', required: true }
+                ],
+                instructions: '获取钉钉配置:\n1. 访问 https://open.dingtalk.com\n2. 创建企业自建应用\n3. 在应用详情获取 Agent ID\n4. 在应用凭证获取 App Key 和 App Secret'
+            },
+            wecom: {
+                name: '企业微信',
+                fields: [
+                    { name: 'corpId', label: 'Corp ID', type: 'text', placeholder: 'ww...', required: true },
+                    { name: 'corpSecret', label: 'Corp Secret', type: 'password', placeholder: '...', required: true },
+                    { name: 'agentId', label: 'Agent ID', type: 'text', placeholder: '...', required: true }
+                ],
+                instructions: '获取企业微信配置:\n1. 访问 https://work.weixin.qq.com\n2. 创建自建应用\n3. 在应用管理获取 Agent ID\n4. 在我的企业获取 Corp ID'
+            },
+            line: {
+                name: 'LINE',
+                fields: [
+                    { name: 'channelAccessToken', label: 'Channel Access Token', type: 'password', placeholder: '...', required: true },
+                    { name: 'channelSecret', label: 'Channel Secret', type: 'password', placeholder: '...', required: true }
+                ],
+                instructions: '获取 LINE 配置:\n1. 访问 https://developers.line.biz\n2. 创建 Provider 和 Channel\n3. 在 Messaging API 获取 Channel Access Token\n4. 在 Basic Settings 获取 Channel Secret'
+            }
+        };
+
+        // 平台选择事件
+        document.getElementById('platformSelect').addEventListener('change', function() {
+            const platform = this.value;
+            const configFields = document.getElementById('platformConfigFields');
+            const instructionsDiv = document.getElementById('platformInstructions');
+            const addBtn = document.getElementById('addPlatformBtn');
+
+            if (!platform || !platformConfigsData[platform]) {
+                configFields.innerHTML = '';
+                instructionsDiv.style.display = 'none';
+                addBtn.style.display = 'none';
+                return;
+            }
+
+            const config = platformConfigsData[platform];
+            let html = '<div class="form-group">';
+            config.fields.forEach(field => {
+                html += '<label for="platform_' + field.name + '">' + field.label + (field.required ? ' *' : '') + '</label>';
+                if (field.type === 'select') {
+                    html += '<select id="platform_' + field.name + '" name="' + field.name + '"' + (field.required ? ' required' : '') + '>';
+                    if (field.options) {
+                        field.options.forEach(opt => {
+                            html += '<option value="' + opt + '">' + opt + '</option>';
+                        });
+                    }
+                    html += '</select>';
+                } else {
+                    html += '<input type="' + field.type + '" id="platform_' + field.name + '" name="' + field.name + '" placeholder="' + (field.placeholder || '') + '"' + (field.required ? ' required' : '') + '>';
+                }
+            });
+            html += '</div>';
+            configFields.innerHTML = html;
+
+            // 显示配置说明
+            document.getElementById('instructionsText').textContent = config.instructions;
+            instructionsDiv.style.display = 'block';
+            addBtn.style.display = 'inline-block';
+        });
+
+        // 添加平台配置按钮
+        document.getElementById('addPlatformBtn').addEventListener('click', function() {
+            const platform = document.getElementById('platformSelect').value;
+            if (!platform || !platformConfigsData[platform]) return;
+
+            const config = platformConfigsData[platform];
+            const selectedPlatforms = document.getElementById('selectedPlatforms');
+
+            // 检查是否已添加
+            if (selectedPlatforms.querySelector('[data-platform="' + platform + '"]')) {
+                alert('该平台已添加');
+                return;
+            }
+
+            let html = '<div class="platform-config-item" data-platform="' + platform + '" style="background: #f5f5f5; padding: 12px; border-radius: 8px; margin-bottom: 12px;">';
+            html += '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">';
+            html += '<strong>' + config.name + '</strong>';
+            html += '<button type="button" class="btn btn-small" onclick="this.parentElement.parentElement.remove()">删除</button>';
+            html += '</div>';
+
+            config.fields.forEach(field => {
+                const value = document.getElementById('platform_' + field.name).value;
+                html += '<div class="form-group" style="margin-bottom: 8px;">';
+                html += '<label style="font-size: 12px;">' + field.label + '</label>';
+                html += '<input type="' + field.type + '" name="' + field.name + '" value="' + value + '" style="width: 100%;">';
+                html += '</div>';
+            });
+            html += '</div>';
+
+            selectedPlatforms.insertAdjacentHTML('beforeend', html);
+
+            // 清空表单
+            document.getElementById('platformSelect').value = '';
+            document.getElementById('platformConfigFields').innerHTML = '';
+            document.getElementById('platformInstructions').style.display = 'none';
+            this.style.display = 'none';
         });
 
         // 编辑租户模态框
@@ -1473,7 +2441,24 @@ const server = http.createServer(async (req, res) => {
     }
 });
 
-server.listen(PORT, () => {
+// 初始化数据库
+initDatabase();
+
+server.listen(PORT, '0.0.0.0', () => {
+    // 获取服务器IP
+    const os = require('os');
+    const interfaces = os.networkInterfaces();
+    let serverIp = 'localhost';
+    for (const name of Object.keys(interfaces)) {
+        for (const iface of interfaces[name]) {
+            if (iface.family === 'IPv4' && !iface.internal) {
+                serverIp = iface.address;
+                break;
+            }
+        }
+        if (serverIp !== 'localhost') break;
+    }
     console.log(`登录页面服务器已启动: http://localhost:${PORT}`);
+    console.log(`外网访问: http://${serverIp}:${PORT}`);
     console.log('按 Ctrl+C 停止服务器');
 });
