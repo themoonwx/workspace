@@ -31,6 +31,24 @@ const tenants = {
     }
 };
 
+// Discord 配置 (版本 2026.3.1 新增)
+const discordConfig = {
+    threadBinding: {
+        enabled: true,
+        idleHours: 24,      // 空闲超时时间（小时）
+        maxAge: 168,        // 最大存活时间（小时），默认7天
+        autoUnbind: true    // 超时后自动解绑
+    }
+};
+
+// Telegram 配置 (版本 2026.3.1 新增)
+const telegramConfig = {
+    dmTopics: {
+        enabled: true,
+        permissions: {}      // 按话题配置权限，格式: { topicId: { allow: [], deny: [] } }
+    }
+};
+
 // 解析请求体
 function parseBody(req) {
     return new Promise((resolve, reject) => {
@@ -190,6 +208,73 @@ async function handleApi(req, res) {
                 res.writeHead(401);
                 res.end(JSON.stringify({ success: false, message: '无效的 token' }));
             }
+            return;
+        }
+
+        // Discord 配置 API (版本 2026.3.1 新增)
+        // 获取 Discord 配置
+        if (url === '/api/discord/config' && method === 'GET') {
+            res.writeHead(200);
+            res.end(JSON.stringify({ success: true, config: discordConfig }));
+            return;
+        }
+
+        // 更新 Discord 线程绑定配置
+        if (url === '/api/discord/config' && method === 'POST') {
+            const body = await parseBody(req);
+            const { idleHours, maxAge, autoUnbind, enabled } = body;
+
+            if (idleHours !== undefined) discordConfig.threadBinding.idleHours = idleHours;
+            if (maxAge !== undefined) discordConfig.threadBinding.maxAge = maxAge;
+            if (autoUnbind !== undefined) discordConfig.threadBinding.autoUnbind = autoUnbind;
+            if (enabled !== undefined) discordConfig.threadBinding.enabled = enabled;
+
+            res.writeHead(200);
+            res.end(JSON.stringify({ success: true, config: discordConfig }));
+            return;
+        }
+
+        // Telegram 配置 API (版本 2026.3.1 新增)
+        // 获取 Telegram 配置
+        if (url === '/api/telegram/config' && method === 'GET') {
+            res.writeHead(200);
+            res.end(JSON.stringify({ success: true, config: telegramConfig }));
+            return;
+        }
+
+        // 更新 Telegram DM 话题权限配置
+        if (url === '/api/telegram/config' && method === 'POST') {
+            const body = await parseBody(req);
+            const { enabled, permissions } = body;
+
+            if (enabled !== undefined) telegramConfig.dmTopics.enabled = enabled;
+            if (permissions !== undefined) telegramConfig.dmTopics.permissions = permissions;
+
+            res.writeHead(200);
+            res.end(JSON.stringify({ success: true, config: telegramConfig }));
+            return;
+        }
+
+        // 配置单个话题权限
+        if (url.startsWith('/api/telegram/topic/') && method === 'POST') {
+            const topicId = url.replace('/api/telegram/topic/', '');
+            const body = await parseBody(req);
+            const { allow, deny } = body;
+
+            telegramConfig.dmTopics.permissions[topicId] = { allow, deny };
+
+            res.writeHead(200);
+            res.end(JSON.stringify({ success: true, topicId, permissions: telegramConfig.dmTopics.permissions[topicId] }));
+            return;
+        }
+
+        // 获取单个话题权限
+        if (url.startsWith('/api/telegram/topic/') && method === 'GET') {
+            const topicId = url.replace('/api/telegram/topic/', '');
+            const permissions = telegramConfig.dmTopics.permissions[topicId] || { allow: [], deny: [] };
+
+            res.writeHead(200);
+            res.end(JSON.stringify({ success: true, topicId, permissions }));
             return;
         }
 
@@ -1344,6 +1429,31 @@ const dashboardPage = `
 `;
 
 const server = http.createServer(async (req, res) => {
+    const url = req.url.split('?')[0];
+
+    // 健康检查端点 (版本 2026.3.1)
+    if (url === '/health' || url === '/healthz') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: 'ok',
+            timestamp: new Date().toISOString(),
+            version: '2026.3.1'
+        }));
+        return;
+    }
+
+    // 就绪检查端点
+    if (url === '/ready' || url === '/readyz') {
+        // 检查服务是否就绪（这里简单返回成功，实际可以检查数据库等）
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: 'ready',
+            timestamp: new Date().toISOString(),
+            version: '2026.3.1'
+        }));
+        return;
+    }
+
     // API 请求处理
     if (req.url.startsWith('/api/')) {
         await handleApi(req, res);
