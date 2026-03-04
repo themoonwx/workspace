@@ -279,7 +279,7 @@ const syncToOpenClaw = async (userId) => {
           });
           console.log(`[Agent创建] 完成: ${agentId} -> ${channelName}`);
         } else {
-          console.log(`[AgentagentId} 已创建] Agent ${存在，跳过创建`);
+          console.log(`[Agent创建] Agent ${agentId} 已存在，跳过创建`);
         }
       } catch (e) {
         console.error('[Agent创建] 创建失败:', e.message);
