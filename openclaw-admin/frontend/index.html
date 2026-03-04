@@ -343,6 +343,28 @@
     .toggle input:checked + .toggle-slider { background: var(--primary); }
     .toggle input:checked + .toggle-slider:before { transform: translateX(22px); }
 
+    /* 权限分类 */
+    .perm-category {
+      background: var(--bg-secondary);
+      border-radius: 12px;
+      padding: 16px 20px;
+      margin-bottom: 16px;
+    }
+    .perm-category-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 16px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .perm-category .field-group {
+      padding: 8px 0;
+    }
+    .perm-category .field-group:not(:last-child) {
+      border-bottom: 1px solid var(--border);
+    }
+
     /* Tabs */
     .tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
     .tab {
@@ -658,65 +680,89 @@
         <input type="hidden" name="user_id">
         <!-- Basic Permissions -->
         <div id="perm-basic" class="perm-tab">
-          <div class="field-group flex items-center justify-between">
-            <div>
-              <label class="mb-1">发送消息</label>
-              <p class="field-hint">允许通过OpenClaw发送消息</p>
+          <!-- 消息权限 -->
+          <div class="perm-category">
+            <div class="perm-category-title">💬 消息权限</div>
+            <div class="field-group flex items-center justify-between">
+              <div>
+                <label class="mb-1">发送消息</label>
+                <p class="field-hint">允许通过OpenClaw发送消息</p>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" name="perm_send_message">
+                <span class="toggle-slider"></span>
+              </label>
             </div>
-            <label class="toggle">
-              <input type="checkbox" name="perm_send_message">
-              <span class="toggle-slider"></span>
-            </label>
+            <div class="field-group flex items-center justify-between">
+              <div>
+                <label class="mb-1">接收消息</label>
+                <p class="field-hint">允许接收并处理消息</p>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" name="perm_receive_message">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
           </div>
-          <div class="field-group flex items-center justify-between">
-            <div>
-              <label class="mb-1">接收消息</label>
-              <p class="field-hint">允许接收并处理消息</p>
+
+          <!-- AI能力权限 -->
+          <div class="perm-category">
+            <div class="perm-category-title">🤖 AI 能力</div>
+            <div class="field-group flex items-center justify-between">
+              <div>
+                <label class="mb-1">调用 Claude Code</label>
+                <p class="field-hint">允许触发AI执行任务</p>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" name="perm_call_claude_code">
+                <span class="toggle-slider"></span>
+              </label>
             </div>
-            <label class="toggle">
-              <input type="checkbox" name="perm_receive_message">
-              <span class="toggle-slider"></span>
-            </label>
           </div>
-          <div class="field-group flex items-center justify-between">
-            <div>
-              <label class="mb-1">调用 Claude Code</label>
-              <p class="field-hint">允许触发AI执行任务</p>
+
+          <!-- 配置权限 -->
+          <div class="perm-category">
+            <div class="perm-category-title">⚙️ 配置权限</div>
+            <div class="field-group flex items-center justify-between">
+              <div>
+                <label class="mb-1">修改服务端配置</label>
+                <p class="field-hint">允许修改OpenClaw配置（需同时开启群组配置）</p>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" name="perm_modify_server">
+                <span class="toggle-slider"></span>
+              </label>
             </div>
-            <label class="toggle">
-              <input type="checkbox" name="perm_call_claude_code">
-              <span class="toggle-slider"></span>
-            </label>
           </div>
-          <div class="field-group flex items-center justify-between">
-            <div>
-              <label class="mb-1">修改服务端配置</label>
-              <p class="field-hint">允许修改OpenClaw配置（危险）</p>
+
+          <!-- 文件权限 -->
+          <div class="perm-category">
+            <div class="perm-category-title">📁 文件权限</div>
+            <div class="field-group flex items-center justify-between">
+              <div>
+                <label class="mb-1">上传文件</label>
+                <p class="field-hint">允许上传文件至OpenClaw</p>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" name="perm_upload_file">
+                <span class="toggle-slider"></span>
+              </label>
             </div>
-            <label class="toggle">
-              <input type="checkbox" name="perm_modify_server">
-              <span class="toggle-slider"></span>
-            </label>
           </div>
-          <div class="field-group flex items-center justify-between">
-            <div>
-              <label class="mb-1">上传文件</label>
-              <p class="field-hint">允许上传文件至OpenClaw</p>
+
+          <!-- 日志权限 -->
+          <div class="perm-category">
+            <div class="perm-category-title">📋 日志权限</div>
+            <div class="field-group flex items-center justify-between">
+              <div>
+                <label class="mb-1">查看日志</label>
+                <p class="field-hint">允许查看操作日志</p>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" name="perm_view_logs">
+                <span class="toggle-slider"></span>
+              </label>
             </div>
-            <label class="toggle">
-              <input type="checkbox" name="perm_upload_file">
-              <span class="toggle-slider"></span>
-            </label>
-          </div>
-          <div class="field-group flex items-center justify-between">
-            <div>
-              <label class="mb-1">查看日志</label>
-              <p class="field-hint">允许查看操作日志</p>
-            </div>
-            <label class="toggle">
-              <input type="checkbox" name="perm_view_logs">
-              <span class="toggle-slider"></span>
-            </label>
           </div>
         </div>
         <!-- Group Config -->
