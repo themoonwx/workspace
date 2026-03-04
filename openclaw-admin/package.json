@@ -1,0 +1,21 @@
+{
+  "name": "openclaw-admin",
+  "version": "1.0.0",
+  "description": "OpenClaw Authorization Management Platform",
+  "private": true,
+  "scripts": {
+    "dev": "node backend/server.js",
+    "build": "echo 'No build step required'",
+    "start": "node backend/server.js",
+    "db:push": "node backend/db.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "better-sqlite3": "^9.4.3",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "cors": "^2.8.5",
+    "uuid": "^9.0.1",
+    "axios": "^1.6.7"
+  }
+}
