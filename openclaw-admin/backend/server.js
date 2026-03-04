@@ -258,6 +258,36 @@ const syncToOpenClaw = async (userId) => {
 
     fs.writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(config, null, 2));
 
+    // 自动为用户创建独立的 Stock Agent
+    const agentScriptPath = '/home/ubuntu/stock-agent-project/create_user_agent.sh';
+    if (fs.existsSync(agentScriptPath)) {
+      try {
+        const platform = user.platform;
+        const username = user.username;
+        const channelName = `${platform}-${username}`;
+
+        // 检查是否已有同名 agent
+        const agentId = `stock-${username}`;
+        const { execSync } = require('child_process');
+        const listResult = execSync('cd /home/ubuntu/openclaw && node openclaw.mjs agents list 2>/dev/null', { encoding: 'utf-8' });
+
+        if (!listResult.includes(agentId)) {
+          console.log(`[Agent创建] 为用户 ${username} 创建独立 Agent: ${agentId}`);
+          execSync(`${agentScriptPath} ${username} ${channelName}`, {
+            cwd: '/home/ubuntu/stock-agent-project',
+            stdio: 'inherit'
+          });
+          console.log(`[Agent创建] 完成: ${agentId} -> ${channelName}`);
+        } else {
+          console.log(`[AgentagentId} 已创建] Agent ${存在，跳过创建`);
+        }
+      } catch (e) {
+        console.error('[Agent创建] 创建失败:', e.message);
+      }
+    } else {
+      console.log('[Agent创建] 脚本不存在，跳过');
+    }
+
     try { execSync('pkill -f "openclaw-gat" 2>/dev/null || true', { stdio: 'ignore' }); } catch (e) {}
     try { execSync('cd /home/ubuntu/openclaw && nohup node dist/index.js gateway > /tmp/gateway.log 2>&1 &', { stdio: 'ignore' }); } catch (e) {}
 
